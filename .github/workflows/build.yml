@@ -1,0 +1,240 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly
+  PLUGIN_ID: deepseek-harness-session
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting, module, provenance, and release identity
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l ./*.go ./.github/scripts/*.go)"
+          go mod verify
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          source = Path("main.go").read_text()
+          match = re.search(r'^var pluginVersion = "([^"]+)"$', source, re.MULTILINE)
+          if not match:
+              raise SystemExit("linker-settable pluginVersion not found")
+          registry = json.loads(Path("registry.json").read_text())
+          if registry.get("schema_version") != 1 or len(registry.get("plugins", [])) != 1:
+              raise SystemExit("registry must use schema 1 and contain exactly one plugin")
+          entry = registry["plugins"][0]
+          expected = {
+              "id": "deepseek-harness-session",
+              "name": "DeepSeek Harness Session Affinity",
+              "author": "ahoo",
+              "repository": "https://github.com/ahoo/cpa-plugin-deepseek-harness-session",
+              "homepage": "https://github.com/ahoo/cpa-plugin-deepseek-harness-session",
+              "license": "MIT",
+          }
+          for key, value in expected.items():
+              if entry.get(key) != value:
+                  raise SystemExit(f"registry {key} mismatch: {entry.get(key)!r}")
+          if entry.get("version") != match.group(1):
+              raise SystemExit("source and registry versions differ")
+          license_text = Path("LICENSE").read_text()
+          for notice in (
+              "Copyright (c) 2025-2005.9 Luis Pater",
+              "Copyright (c) 2025.9-present Router-For.ME",
+              "Copyright (c) 2026 ahoo",
+          ):
+              if notice not in license_text:
+                  raise SystemExit(f"missing license notice: {notice}")
+          provenance = Path("NOTICE").read_text()
+          for reference in (
+              "0ed85bb88b0b4b4d8538c2fbed067cfec7c7512c",
+              "44ea9abceda7ef83d4ff876216feec1f21bf646c",
+              "3192d9a378149845931d9166eab7df237c4d19a6",
+          ):
+              if reference not in provenance:
+                  raise SystemExit(f"missing provenance reference: {reference}")
+          PY
+
+      - name: Vet and test
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go vet ./.github/scripts
+          go test ./...
+          go test ./.github/scripts
+          go test -race ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+            ext: so
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            ext: so
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+            ext: dylib
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+            ext: dylib
+          - goos: windows
+            goarch: amd64
+            runner: windows-2025
+            ext: dll
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Resolve release metadata
+        run: |
+          set -euo pipefail
+          REGISTRY_VERSION="$(python3 -c 'import json; print(json.load(open("registry.json"))["plugins"][0]["version"])')"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            [[ "${GITHUB_REF_NAME}" == v* ]]
+            VERSION="${GITHUB_REF_NAME#v}"
+            [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "${VERSION}" = "${REGISTRY_VERSION}"
+          else
+            VERSION="${REGISTRY_VERSION}-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
+
+      - name: Build shared library
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -buildvcs=true -buildmode=c-shared \
+              -ldflags "-s -w -X main.pluginVersion=${VERSION}" \
+              -o "dist/${LIB_NAME}" .
+          rm -f "dist/${PLUGIN_ID}.h"
+
+      - name: Verify registration, ABI guards, and behavior
+        run: python3 .github/scripts/verify-registration.py --library "dist/${LIB_NAME}" --version "${VERSION}"
+
+      - name: Package plugin
+        run: |
+          set -euo pipefail
+          go run ./.github/scripts/package-release.go \
+            -library "dist/${LIB_NAME}" \
+            -archive "${ARCHIVE_NAME}" \
+            -checksum "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify and publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat dist/*.sha256 | LC_ALL=C sort -k2 > dist/checksums.txt
+          (cd dist && sha256sum -c checksums.txt)
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import zipfile
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          expected = {
+              f"deepseek-harness-session_{version}_darwin_amd64.zip": "deepseek-harness-session.dylib",
+              f"deepseek-harness-session_{version}_darwin_arm64.zip": "deepseek-harness-session.dylib",
+              f"deepseek-harness-session_{version}_linux_amd64.zip": "deepseek-harness-session.so",
+              f"deepseek-harness-session_{version}_linux_arm64.zip": "deepseek-harness-session.so",
+              f"deepseek-harness-session_{version}_windows_amd64.zip": "deepseek-harness-session.dll",
+          }
+          archives = {path.name: path for path in pathlib.Path("dist").glob("*.zip")}
+          if set(archives) != set(expected):
+              raise SystemExit(f"unexpected archives: {sorted(archives)}")
+          for name, root in expected.items():
+              with zipfile.ZipFile(archives[name]) as bundle:
+                  if bundle.namelist() != [root]:
+                      raise SystemExit(f"unexpected archive layout: {name}: {bundle.namelist()}")
+                  info = bundle.infolist()[0]
+                  if info.date_time != (1980, 1, 1, 0, 0, 0):
+                      raise SystemExit(f"non-deterministic timestamp: {name}: {info.date_time}")
+                  if (info.external_attr >> 16) & 0o777 != 0o755:
+                      raise SystemExit(f"unexpected root mode: {name}")
+          PY
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Automated immutable release for ${GITHUB_REF_NAME}."

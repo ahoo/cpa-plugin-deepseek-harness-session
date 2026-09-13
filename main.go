@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+//
+// Portions of the c-shared ABI bridge derive from CLIProxyAPI examples.
+// See NOTICE for provenance and attribution.
 package main
 
 /*
@@ -61,15 +65,16 @@ import (
 	"unsafe"
 )
 
-const abiVersion uint32 = 1
-
 const (
-	pluginID      = "deepseek-harness-session"
-	pluginVersion = "0.1.1"
+	abiVersion        uint32 = 1
+	pluginID                 = "deepseek-harness-session"
+	maxCGoBytesLength uint64 = 1<<31 - 1
 
 	sourceHeader = "X-DeepSeek-Harness-Session-Id"
 	targetHeader = "X-Session-ID"
 )
+
+var pluginVersion = "0.1.2"
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -127,26 +132,49 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 }
 
 //export cliproxyPluginCall
-func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) (status C.int) {
+	status = 1
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
 	}
+	defer func() {
+		if recover() != nil {
+			writeResponse(response, errorEnvelope("plugin_panic", "plugin call failed"))
+			status = 1
+		}
+	}()
 	if method == nil {
 		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
 		return 1
 	}
-	var payload []byte
-	if request != nil && requestLen > 0 {
-		payload = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
-	}
-	raw, errHandle := handleMethod(C.GoString(method), payload)
-	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+	if !requestLengthSupported(uint64(requestLen)) {
+		writeResponse(response, errorEnvelope("request_too_large", "request exceeds plugin ABI limit"))
 		return 1
 	}
+	var payload []byte
+	if requestLen > 0 {
+		if request == nil {
+			writeResponse(response, errorEnvelope("invalid_request", "request buffer is required"))
+			return 1
+		}
+		payload = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+	}
+	raw, callStatus := processPluginCall(C.GoString(method), payload)
 	writeResponse(response, raw)
-	return 0
+	return C.int(callStatus)
+}
+
+func requestLengthSupported(length uint64) bool {
+	return length <= maxCGoBytesLength
+}
+
+func processPluginCall(method string, payload []byte) ([]byte, int) {
+	raw, errHandle := handleMethod(method, payload)
+	if errHandle != nil {
+		return errorEnvelope("plugin_error", errHandle.Error()), 1
+	}
+	return raw, 0
 }
 
 //export cliproxyPluginFree
@@ -169,7 +197,7 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 				Name:             pluginID,
 				Version:          pluginVersion,
 				Author:           "ahoo",
-				GitHubRepository: "https://github.com/ahoo/cliproxy-plugins",
+				GitHubRepository: "https://github.com/ahoo/cpa-plugin-deepseek-harness-session",
 				Logo:             "",
 				ConfigFields:     []any{},
 			},
