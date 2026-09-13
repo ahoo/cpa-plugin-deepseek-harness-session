@@ -1,43 +1,82 @@
-# CLIProxyAPI Plugins Store
+# cpa-plugin-deepseek-harness-session
 
-CLIProxyAPI 插件仓库,通过 [Plugin Store](https://github.com/router-for-me/CLIProxyAPI) 机制发布/安装。
+A focused CLIProxyAPI request interceptor that maps the DeepSeek Harness conversation header:
 
-## 插件列表
+```text
+X-DeepSeek-Harness-Session-Id -> X-Session-ID
+```
 
-| ID | 版本 | 说明 |
-|----|------|------|
-| `deepseek-harness-session` | 0.1.1 | 将 `X-DeepSeek-Harness-Session-Id` 映射为 `X-Session-ID`,使 deepseek-harness 客户端的 session-affinity 缓存生效 |
+This lets deepseek-harness clients participate in CLIProxyAPI session-affinity routing and retain stable upstream selection across turns.
 
-## 安装
+## Behavior
 
-代理端配置 `plugins.store-sources` 指向本仓库 `registry.json`,然后通过管理 API 安装:
+The plugin runs on both `request.intercept_before` and `request.intercept_after`:
+
+- Header-name matching is case-insensitive.
+- Leading and trailing whitespace is removed from the source value.
+- A missing or blank source header is a no-op.
+- An existing `X-Session-ID` header is authoritative and is never overwritten.
+- The plugin changes headers only; request bodies, credentials, routing configuration, and responses are untouched.
+
+## Install
+
+The existing official Store identity remains:
+
+- ID: `deepseek-harness-session`
+- Name: `DeepSeek Harness Session Affinity`
+
+Once the Store record points to this dedicated repository, install or update that existing entry through the CLIProxyAPI plugin-management API. Example configuration:
 
 ```yaml
 plugins:
   enabled: true
-  store-sources:
-    - "https://raw.githubusercontent.com/ahoo/cliproxy-plugins/main/registry.json"
   configs:
     deepseek-harness-session:
       enabled: true
       priority: 1
 ```
 
-```
-POST /v0/management/plugin-store/deepseek-harness-session/install
-```
+CLIProxyAPI loads Go shared libraries only at startup, so restart the host after installing or replacing the artifact.
 
-## 构建插件
+## Build
+
+The build script uses a pinned Debian/glibc builder, mounts this repository read-only, runs formatting/module/vet/test/race and package-helper gates, and writes to repository-local staging by default:
 
 ```bash
-cd examples/plugin/deepseek-harness-session/go
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared \
-  -o deepseek-harness-session-v0.1.1.so .
+./build.sh
+# dist/local/linux_amd64/deepseek-harness-session-v0.1.2.so
 ```
 
-## 发布新版本
+Override the staging location with `PLUGIN_OUT_DIR`. Do not build directly into a live plugin mount.
 
-1. 构建 `.so`,打包 `<id>_<version>_<goos>_<goarch>.zip`(zip 根目录放 `deepseek-harness-session-v<version>.so`)
-2. 生成 `checksums.txt`(zip 的 sha256)
-3. `gh release create v<version>` 附带 zip + checksums.txt
-4. 更新 `registry.json` 中的 `version`
+Direct source checks:
+
+```bash
+test -z "$(gofmt -l ./*.go ./.github/scripts/*.go)"
+go mod verify
+go vet ./...
+go vet ./.github/scripts
+go test ./...
+go test ./.github/scripts
+go test -race ./...
+```
+
+## Releases
+
+A `v<version>` tag builds five native archives named:
+
+```text
+deepseek-harness-session_<version>_<goos>_<goarch>.zip
+```
+
+Each archive contains exactly one canonical root library (`deepseek-harness-session.so`, `.dylib`, or `.dll`) with deterministic metadata. `checksums.txt` uses `sha256sum` format, and the workflow refuses to replace an existing GitHub Release.
+
+### Historical release correction
+
+The legacy `ahoo/cliproxy-plugins` v0.1.0 and v0.1.1 tags both pointed to a registry-only commit; their generated source archives contained no plugin source. The v0.1.1 binary also recorded a dirty CLIProxyAPI checkout rather than a clean plugin source revision. Those historical tags and assets remain unchanged in the legacy repository.
+
+This dedicated repository preserves the original four-commit history but intentionally does not recreate the defective old tags. `v0.1.2` is the first clean, source-bearing release whose binary provenance resolves to the tagged dedicated-repository commit.
+
+## Provenance and license
+
+Plugin-specific session mapping was introduced by `ahoo` in legacy commit [`3192d9a`](https://github.com/ahoo/cliproxy-plugins/commit/3192d9a378149845931d9166eab7df237c4d19a6). The c-shared ABI bridge derives from Router-For.ME CLIProxyAPI examples by Luis Pater. See [NOTICE](NOTICE) for immutable source references and [LICENSE](LICENSE) for the complete MIT notices.

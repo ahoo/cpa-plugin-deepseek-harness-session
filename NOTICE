@@ -1,0 +1,26 @@
+deepseek-harness-session provenance and attribution
+====================================================
+
+The c-shared plugin ABI definitions, initialization bridge, envelope types,
+and allocation/free helpers in this repository are derived from the
+CLIProxyAPI Go plugin examples maintained by Router-For.ME and Luis Pater:
+
+- https://github.com/router-for-me/CLIProxyAPI/blob/78f0c4079e3e6273d65d03b5549cffc898703264/examples/plugin/host-callback/go/main.go
+- https://github.com/router-for-me/CLIProxyAPI/commit/0ed85bb88b0b4b4d8538c2fbed067cfec7c7512c
+- https://github.com/router-for-me/CLIProxyAPI/commit/44ea9abceda7ef83d4ff876216feec1f21bf646c
+
+Those portions are used under the MIT License. Their copyright notices are
+preserved verbatim in LICENSE.
+
+The DeepSeek Harness session-header mapping was authored by ahoo and first
+published as source in the legacy repository at:
+
+- https://github.com/ahoo/cliproxy-plugins/commit/3192d9a378149845931d9166eab7df237c4d19a6
+- main.go blob d29830b94bc4d8d332f2a42af1396ef6c7af8e34
+
+This dedicated repository preserves the complete four-commit legacy history
+on its main branch. The historical v0.1.0 and v0.1.1 tags remain only in the
+legacy repository and are intentionally not recreated here: both pointed to
+the initial registry-only commit, and their generated source archives did not
+contain the plugin source. Version v0.1.2 is the first clean, source-bearing,
+reproducible release from this dedicated repository.
